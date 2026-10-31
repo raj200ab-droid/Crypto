@@ -1,4 +1,4 @@
-import requests
+from http_client import get_json
 
 BASES = [
     "https://api.binance.com",
@@ -19,13 +19,10 @@ def _get(path, params=None):
         bases.remove(_working_base["url"])
         bases.insert(0, _working_base["url"])
     for base in bases:
-        try:
-            r = requests.get(base + path, params=params, timeout=10)
-            if r.status_code == 200:
-                _working_base["url"] = base
-                return r.json()
-        except Exception:
-            continue
+        data = get_json(base + path, params=params, timeout=10)
+        if data is not None:
+            _working_base["url"] = base
+            return data
     return None
 
 

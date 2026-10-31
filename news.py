@@ -1,5 +1,6 @@
 import re
-import requests
+
+from http_client import get_json
 
 NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
 
@@ -18,10 +19,10 @@ NAMES = {
 
 def fetch_latest_news(limit=30):
     try:
-        r = requests.get(NEWS_URL, timeout=10)
-        if r.status_code != 200:
+        payload = get_json(NEWS_URL, timeout=10)
+        if not isinstance(payload, dict):
             return []
-        items = r.json().get("Data", [])
+        items = payload.get("Data", [])
         news = []
         for it in items[: int(limit)]:
             news.append({

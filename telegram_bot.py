@@ -1,16 +1,15 @@
-import requests
+from http_client import post_json
 
 
 def send_telegram_message(token, chat_id, message):
     if not token or not chat_id:
         return False
     try:
-        r = requests.post(
+        return post_json(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message},
+            {"chat_id": chat_id, "text": message},
             timeout=10,
         )
-        return r.status_code == 200
     except Exception as e:
         print(f"Telegram error: {e}")
         return False

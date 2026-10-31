@@ -1,5 +1,4 @@
-import requests
-
+from http_client import get_json
 from binance_data import get_klines
 from strategy import get_trend_direction, refresh_result
 
@@ -11,8 +10,8 @@ def get_btc_trend():
 
 def get_fear_greed_index():
     try:
-        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-        return int(r.json()["data"][0]["value"])
+        data = get_json("https://api.alternative.me/fng/?limit=1", timeout=10)
+        return int(data["data"][0]["value"])
     except Exception:
         return None
 
