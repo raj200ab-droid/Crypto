@@ -49,18 +49,20 @@ from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.clock import Clock
+from kivy.metrics import dp
 
 IMPORT_ERROR = None
 try:
     from binance_data import get_top_symbols, get_klines, get_trend_timeframe, get_current_price
-    from strategy import analyze_symbol, suggest_exit_plan, get_trend_direction, apply_mtf_confirmation
+    from strategy import (analyze_symbol, suggest_exit_plan, get_trend_direction,
+                          apply_mtf_confirmation, project_future_candles)
     from news import fetch_latest_news, get_sentiment_for_symbol
     from tracker import init_db, save_signal, check_pending_signals, get_stats, get_pending_count, get_recent_history
     from config import load_settings, save_settings
     from telegram_bot import send_telegram_message, format_signal_message
     from risk_calculator import calculate_position_size
     from market_context import get_btc_trend, get_fear_greed_index, apply_market_context_filter
-    from chart_widget import ChartView
+    from chart_widget import ChartView, CandleCanvas, GREEN, RED, WHITE
     from paper_trading import (init_paper_db, open_paper_trade, check_paper_trades,
                                 get_balance, get_open_trades, get_paper_trade_history)
 except Exception:
@@ -105,7 +107,7 @@ class CryptoScannerApp(App):
         self.mtf_confirm_enabled = True
         self.refresh_event = None
         self.last_scan_results = []   # filter/sort এর জন্য cache
-        self.filter_mode = "All"
+        self.filter_mode = "BUY Only"
         self.sort_mode = "Score"
         self.btc_trend = "NEUTRAL"
         self.fear_greed = None
@@ -150,7 +152,7 @@ class CryptoScannerApp(App):
         signals_container = BoxLayout(orientation="vertical")
 
         filter_bar = BoxLayout(orientation="horizontal", size_hint_y=None, height=45, spacing=5, padding=5)
-        self.filter_spinner = Spinner(text="All", values=["All", "BUY Only", "SELL Only", "Strong Only"], size_hint_x=0.5)
+        self.filter_spinner = Spinner(text="BUY Only", values=["All", "BUY Only", "SELL Only", "Strong Only"], size_hint_x=0.5)
         self.filter_spinner.bind(text=self.on_filter_change)
         filter_bar.add_widget(self.filter_spinner)
 
@@ -377,6 +379,7 @@ class CryptoScannerApp(App):
             if result["signal"] != "HOLD":
                 result["symbol"] = symbol
                 result["news"] = related_news
+                result["candles"] = df_entry[-40:]
                 signals_found.append(result)
 
                 if result["signal"] in ["BUY", "STRONG_BUY", "SELL", "STRONG_SELL"]:
@@ -404,12 +407,79 @@ class CryptoScannerApp(App):
         Clock.schedule_once(finish, 0)
 
     # ---------------- DISPLAY ----------------
+    def build_card(self, result):
+        symbol = result["symbol"]
+        signal = result["signal"]
+        score = max(result["buy_score"], result["sell_score"])
+        is_buy = signal in ("BUY", "STRONG_BUY")
+        exit_plan = suggest_exit_plan(result["price"], result["atr"], signal) if is_buy else None
+
+        if exit_plan:
+            entry, sl, tp = exit_plan["entry"], exit_plan["stop_loss"], exit_plan["take_profit"]
+            gain = (tp - entry) / entry * 100.0
+            loss = (entry - sl) / entry * 100.0
+            text = (
+                f"[b]{symbol}[/b]  |  {signal}  |  Score: {score}/100\n"
+                f"[color=33ff77][b]BUY at: {entry}[/b][/color]\n"
+                f"[color=4da6ff][b]SELL at (target): {tp}[/b]  (+{gain:.1f}%)[/color]\n"
+                f"[color=ff6666]Stop-loss: {sl}  (-{loss:.1f}%)[/color]\n"
+                f"RSI: {result['rsi']}  |  TF: {self.current_timeframe}\n"
+            )
+        else:
+            text = (
+                f"[b]{symbol}[/b]  |  Score: {score}/100  |  TF: {self.current_timeframe}\n"
+                f"Price: {result['price']}  |  RSI: {result['rsi']}\n"
+                f"Signal: [b]{signal}[/b]\n"
+            )
+
+        if self.mtf_confirm_enabled:
+            text += f"MTF: {result.get('mtf_status', '')}\n"
+        text += f"Market: {result.get('market_context_note', '')}\n"
+        text += f"Reasons: {', '.join(result['reasons'])}\n"
+
+        if exit_plan:
+            pos_info = calculate_position_size(
+                self.settings.get("account_balance", 1000.0),
+                self.settings.get("risk_percent", 2.0),
+                result["price"], exit_plan["stop_loss"]
+            )
+            if pos_info:
+                text += f"Suggested Size: ${pos_info['position_size_usd']} (risking ${pos_info['risk_amount']})\n"
+
+        label = Label(text=text, markup=True, size_hint_y=None, height=dp(160),
+                      halign="left", valign="top", **self.label_kwargs())
+        label.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)))
+        label.bind(texture_size=lambda inst, ts: setattr(inst, "height", ts[1] + dp(8)))
+
+        candles = result.get("candles")
+        if not (exit_plan and candles):
+            return label
+
+        chart = CandleCanvas(size_hint_y=None, height=dp(170))
+        future = project_future_candles(candles[-1]["close"], entry, tp, result["atr"])
+        chart.set_data(candles, future=future,
+                       levels=[(entry, WHITE), (tp, GREEN), (sl, RED)], max_real=40)
+        caption = Label(text="Blue candles = scenario if the target is reached (not a prediction)",
+                        size_hint_y=None, height=dp(20), font_size=dp(11), **self.label_kwargs())
+
+        card = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4))
+        card.add_widget(label)
+        card.add_widget(chart)
+        card.add_widget(caption)
+
+        def fit(*args):
+            card.height = label.height + chart.height + caption.height + dp(12)
+
+        label.bind(height=fit)
+        fit()
+        return card
+
     def display_results(self, signals):
         self.result_layout.clear_widgets()
         filtered = self.apply_filter_sort(signals)
 
         if not filtered:
-            self.result_layout.add_widget(Label(text="No signals match filter.", size_hint_y=None, height=50, **self.label_kwargs()))
+            self.result_layout.add_widget(Label(text=("No coins to BUY right now." if self.filter_mode == "BUY Only" else "No signals match filter."), size_hint_y=None, height=dp(50), **self.label_kwargs()))
             return
 
         for result in filtered:
@@ -417,35 +487,7 @@ class CryptoScannerApp(App):
             signal = result["signal"]
             score = max(result["buy_score"], result["sell_score"])
 
-            card_text = (
-                f"[b]{symbol}[/b]  |  Score: {score}/100  |  TF: {self.current_timeframe}\n"
-                f"Price: {result['price']}  |  RSI: {result['rsi']}\n"
-                f"Signal: [b]{signal}[/b]\n"
-            )
-
-            if self.mtf_confirm_enabled:
-                card_text += f"MTF: {result.get('mtf_status', '')}\n"
-
-            card_text += f"Market: {result.get('market_context_note', '')}\n"
-            card_text += f"Reasons: {', '.join(result['reasons'])}\n"
-
-            if signal in ["BUY", "STRONG_BUY"]:
-                exit_plan = suggest_exit_plan(result["price"], result["atr"], signal)
-                if exit_plan:
-                    card_text += f"Entry: {exit_plan['entry']} | SL: {exit_plan['stop_loss']} | TP: {exit_plan['take_profit']}\n"
-
-                    pos_info = calculate_position_size(
-                        self.settings.get("account_balance", 1000.0),
-                        self.settings.get("risk_percent", 2.0),
-                        result["price"], exit_plan["stop_loss"]
-                    )
-                    if pos_info:
-                        card_text += f"Suggested Size: ${pos_info['position_size_usd']} (risking ${pos_info['risk_amount']})\n"
-
-            label = Label(text=card_text, markup=True, size_hint_y=None, height=230,
-                          halign="left", valign="top", **self.label_kwargs())
-            label.bind(size=lambda inst, val: setattr(inst, "text_size", val))
-            self.result_layout.add_widget(label)
+            self.result_layout.add_widget(self.build_card(result))
 
             signal_key = f"{symbol}_{self.current_timeframe}"
             prev_signal = self.last_signals.get(signal_key)
@@ -486,9 +528,10 @@ class CryptoScannerApp(App):
             f"Avg Profit/Trade: {overall['avg_profit_percent']}%\n"
             f"Pending: {pending_count}\n"
         )
-        summary = Label(text=summary_text, markup=True, size_hint_y=None, height=180,
+        summary = Label(text=summary_text, markup=True, size_hint_y=None, height=dp(160),
                         halign="left", valign="top", **self.label_kwargs())
-        summary.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+        summary.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)))
+        summary.bind(texture_size=lambda inst, ts: setattr(inst, "height", ts[1] + dp(16)))
         self.stats_layout.add_widget(summary)
 
         for symbol, tf, sig_type, status, profit, closed_at in get_recent_history(15):

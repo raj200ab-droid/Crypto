@@ -1,4 +1,6 @@
 """Technical analysis in pure Python (no pandas / numpy needed)."""
+import math
+
 from config import load_settings
 
 
@@ -271,3 +273,22 @@ def apply_mtf_confirmation(result, trend_direction):
         result["mtf_status"] = "Higher TF neutral"
         result["mtf_confirmed"] = None
     return result
+
+
+def project_future_candles(last_close, entry, take_profit, atr_value, n=12):
+    """Scenario candles showing the path IF the trade works out (entry -> target).
+    This is an illustration of the plan, NOT a prediction."""
+    if not atr_value or atr_value <= 0 or take_profit <= entry:
+        return []
+    out = []
+    prev = last_close
+    for i in range(1, n + 1):
+        close = entry + (take_profit - entry) * i / n
+        if i < n:
+            close += math.sin(i * 1.7) * 0.25 * atr_value
+        high = max(prev, close) + 0.3 * atr_value
+        low = max(min(prev, close) - 0.3 * atr_value, 0.0)
+        out.append({"time": None, "open": prev, "high": high, "low": low,
+                    "close": close, "volume": 0.0})
+        prev = close
+    return out

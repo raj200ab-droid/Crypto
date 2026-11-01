@@ -47,8 +47,12 @@ try:
     app.update_paper_view()
     fake = {"symbol": "TESTUSDT", "signal": "BUY", "buy_score": 80, "sell_score": 10,
             "price": 100.0, "rsi": 25.0, "atr": 2.0, "reasons": ["test"],
-            "mtf_status": "ok", "market_context_note": "ok"}
+            "mtf_status": "ok", "market_context_note": "ok",
+            "candles": candles[-40:]}
     app.display_results([fake])
+    assert len(app.result_layout.children) == 1, "BUY card missing"
+    card = app.result_layout.children[0]
+    assert len(card.children) == 3, "card should have text + chart + caption"
     for _ in range(5):
         EventLoop.idle()
 except Exception:
