@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  smoke-test:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -15,31 +15,60 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Install system packages
+      - name: Install Kivy and headless display
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip autopoint gettext autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
+          sudo apt-get install -y xvfb libgl1-mesa-dri libglx-mesa0 libmtdev1 libsdl2-2.0-0
+          pip install kivy
 
-      - name: Install buildozer
+      - name: Run app smoke test
         run: |
-          pip install --upgrade pip
-          pip install buildozer cython==0.29.36
+          xvfb-run -a python - <<'PY'
+          import os, sys, tempfile, traceback, random
+          os.environ["ANDROID_PRIVATE"] = tempfile.mkdtemp()
+          os.environ["KIVY_NO_ARGS"] = "1"
+          sys.path.insert(0, os.getcwd())
 
-      - name: Build debug APK
-        run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
-          buildozer android debug
+          def fail(title, text):
+              print("\n" + "=" * 60 + "\nSMOKE TEST FAILED: " + title + "\n" + "=" * 60 + "\n" + text)
+              sys.exit(1)
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: cryptoscanner-apk
-          path: bin/*.apk
+          try:
+              import main
+          except Exception:
+              fail("import main", traceback.format_exc())
+          if main.IMPORT_ERROR:
+              fail("project import", main.IMPORT_ERROR)
+
+          try:
+              app = main.CryptoScannerApp()
+              root = app.build()
+          except Exception:
+              fail("build()", traceback.format_exc())
+          if isinstance(root, main.ScrollView):
+              fail("build() returned error screen", root.children[0].text)
+
+          from kivy.base import EventLoop
+          from kivy.core.window import Window
+          try:
+              EventLoop.ensure_window()
+              Window.add_widget(root)
+              for _ in range(10):
+                  EventLoop.idle()
+          except Exception:
+              fail("rendering first frames", traceback.format_exc())
+
+          try:
+              random.seed(1)
+              p, candles = 100.0, []
+              for i in range(100):
+                  o = p
+                  p = p * (1 + random.gauss(0, 0.01))
+                  candles.append({"time": i, "open": o, "high": max(o, p) * 1.003,
+                                  "low": min(o, p) * 0.997, "close": p, "volume": 1000.0})
+              app.chart_view.show_chart("TESTUSDT", candles, "1h")
+              for _ in range(5):
+                  EventLoop.idle()
+              app.update_stats_view()
+              app.update_paper_view()
+              fake = {"symbol": "TESTUSDT", "signal": "BUY", "buy_score": 80
