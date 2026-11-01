@@ -1,3 +1,6 @@
+import threading
+import traceback
+
 from kivy.app import App
 from kivy.core.window import Window
 from kivy.uix.boxlayout import BoxLayout
@@ -9,17 +12,21 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.clock import Clock
 
-from binance_data import get_top_symbols, get_klines, get_trend_timeframe, get_current_price
-from strategy import analyze_symbol, suggest_exit_plan, get_trend_direction, apply_mtf_confirmation
-from news import fetch_latest_news, get_sentiment_for_symbol
-from tracker import init_db, save_signal, check_pending_signals, get_stats, get_pending_count, get_recent_history
-from config import load_settings, save_settings
-from telegram_bot import send_telegram_message, format_signal_message
-from risk_calculator import calculate_position_size
-from market_context import get_btc_trend, get_fear_greed_index, apply_market_context_filter
-from chart_widget import ChartView
-from paper_trading import (init_paper_db, open_paper_trade, check_paper_trades,
-                            get_balance, get_open_trades, get_paper_trade_history)
+IMPORT_ERROR = None
+try:
+    from binance_data import get_top_symbols, get_klines, get_trend_timeframe, get_current_price
+    from strategy import analyze_symbol, suggest_exit_plan, get_trend_direction, apply_mtf_confirmation
+    from news import fetch_latest_news, get_sentiment_for_symbol
+    from tracker import init_db, save_signal, check_pending_signals, get_stats, get_pending_count, get_recent_history
+    from config import load_settings, save_settings
+    from telegram_bot import send_telegram_message, format_signal_message
+    from risk_calculator import calculate_position_size
+    from market_context import get_btc_trend, get_fear_greed_index, apply_market_context_filter
+    from chart_widget import ChartView
+    from paper_trading import (init_paper_db, open_paper_trade, check_paper_trades,
+                                get_balance, get_open_trades, get_paper_trade_history)
+except Exception:
+    IMPORT_ERROR = traceback.format_exc()
 
 try:
     from plyer import notification
@@ -31,8 +38,26 @@ TIMEFRAME_INTERVALS = {"15m": 120, "1h": 300, "4h": 900, "1d": 3600}
 TRACK_CHECK_INTERVAL = 180
 
 
+def error_screen(text):
+    scroll = ScrollView()
+    label = Label(text="STARTUP ERROR (send screenshot to Claude):\n\n" + text,
+                  size_hint_y=None, halign="left", valign="top", font_size=12)
+    label.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)))
+    label.bind(texture_size=lambda inst, ts: setattr(inst, "height", ts[1]))
+    scroll.add_widget(label)
+    return scroll
+
+
 class CryptoScannerApp(App):
     def build(self):
+        if IMPORT_ERROR:
+            return error_screen(IMPORT_ERROR)
+        try:
+            return self.build_ui()
+        except Exception:
+            return error_screen(traceback.format_exc())
+
+    def build_ui(self):
         self.title = "Crypto Signal Scanner Pro"
         self.settings = load_settings()
         self.last_signals = {}
@@ -223,6 +248,9 @@ class CryptoScannerApp(App):
 
     # ---------------- TRACKING ----------------
     def update_tracking(self):
+        threading.Thread(target=self._tracking_worker, daemon=True).start()
+
+    def _tracking_worker(self):
         try:
             check_pending_signals(get_current_price, expiry_days=7)
             if self.settings.get("paper_trading_enabled", True):
@@ -233,35 +261,59 @@ class CryptoScannerApp(App):
     # ---------------- CHART ----------------
     def load_chart(self):
         symbol = self.chart_symbol_spinner.text
-        df = get_klines(symbol, interval=self.current_timeframe, limit=100)
-        if df is not None:
-            self.chart_view.show_chart(symbol, df, self.current_timeframe)
+        try:
+            df = get_klines(symbol, interval=self.current_timeframe, limit=100)
+            if df is not None:
+                self.chart_view.show_chart(symbol, df, self.current_timeframe)
+        except Exception as e:
+            self.header.text = f"Chart error: {e}"
+
 
     # ---------------- MAIN SCAN ----------------
+    def set_header(self, text):
+        Clock.schedule_once(lambda dt: setattr(self.header, "text", text), 0)
+
     def scan_market(self):
+        if getattr(self, "_scanning", False):
+            return
+        self._scanning = True
         self.result_layout.clear_widgets()
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+
+    def _scan_worker(self):
+        try:
+            self._scan_inner()
+        except Exception:
+            err = traceback.format_exc()
+            print(err)
+            self.set_header("Scan error: " + err.strip().splitlines()[-1][:80])
+        finally:
+            self._scanning = False
+
+    def _scan_inner(self):
         timeframe = self.current_timeframe
-        self.header.text = f"[{timeframe}] Fetching market context..."
+        mtf_enabled = self.mtf_confirm_enabled
+        self.set_header(f"[{timeframe}] Fetching market context...")
 
         self.btc_trend = get_btc_trend()
         self.fear_greed = get_fear_greed_index()
         news_list = fetch_latest_news(limit=30)
 
-        self.header.text = f"[{timeframe}] Finding top coins..."
-        top_n = self.settings.get("top_n_coins", 40)
+        self.set_header(f"[{timeframe}] Finding top coins...")
+        top_n = int(self.settings.get("top_n_coins", 40))
         symbols = get_top_symbols(limit=top_n)
 
         if not symbols:
-            self.header.text = "Error: Could not fetch symbols (check internet)"
+            self.set_header("Error: Could not fetch symbols (check internet)")
             return
 
-        self.chart_symbol_spinner.values = symbols
+        Clock.schedule_once(lambda dt: setattr(self.chart_symbol_spinner, "values", symbols), 0)
         trend_timeframe = get_trend_timeframe(timeframe)
-        self.header.text = f"[{timeframe}] Analyzing {len(symbols)} coins..."
 
         signals_found = []
 
-        for symbol in symbols:
+        for idx, symbol in enumerate(symbols, 1):
+            self.set_header(f"[{timeframe}] Analyzing {idx}/{len(symbols)}: {symbol}")
             df_entry = get_klines(symbol, interval=timeframe, limit=100)
             if df_entry is None:
                 continue
@@ -271,7 +323,7 @@ class CryptoScannerApp(App):
             if result is None:
                 continue
 
-            if self.mtf_confirm_enabled:
+            if mtf_enabled:
                 df_trend = get_klines(symbol, interval=trend_timeframe, limit=100)
                 trend_direction = get_trend_direction(df_trend)
                 result = apply_mtf_confirmation(result, trend_direction)
@@ -299,9 +351,17 @@ class CryptoScannerApp(App):
                                               exit_plan["stop_loss"], exit_plan["take_profit"],
                                               self.settings.get("risk_percent", 2.0))
 
-        self.last_scan_results = signals_found
-        self.header.text = f"[{timeframe}] Scan Complete - {len(signals_found)} signals | BTC: {self.btc_trend}"
-        self.display_results(signals_found)
+        def finish(dt):
+            self.last_scan_results = signals_found
+            self.header.text = f"[{timeframe}] Scan Complete - {len(signals_found)} signals | BTC: {self.btc_trend}"
+            try:
+                self.display_results(signals_found)
+            except Exception:
+                err = traceback.format_exc()
+                print(err)
+                self.header.text = "Display error: " + err.strip().splitlines()[-1][:80]
+
+        Clock.schedule_once(finish, 0)
 
     # ---------------- DISPLAY ----------------
     def display_results(self, signals):
@@ -331,15 +391,16 @@ class CryptoScannerApp(App):
 
             if signal in ["BUY", "STRONG_BUY"]:
                 exit_plan = suggest_exit_plan(result["price"], result["atr"], signal)
-                card_text += f"Entry: {exit_plan['entry']} | SL: {exit_plan['stop_loss']} | TP: {exit_plan['take_profit']}\n"
+                if exit_plan:
+                    card_text += f"Entry: {exit_plan['entry']} | SL: {exit_plan['stop_loss']} | TP: {exit_plan['take_profit']}\n"
 
-                pos_info = calculate_position_size(
-                    self.settings.get("account_balance", 1000.0),
-                    self.settings.get("risk_percent", 2.0),
-                    result["price"], exit_plan["stop_loss"]
-                )
-                if pos_info:
-                    card_text += f"Suggested Size: ${pos_info['position_size_usd']} (risking ${pos_info['risk_amount']})\n"
+                    pos_info = calculate_position_size(
+                        self.settings.get("account_balance", 1000.0),
+                        self.settings.get("risk_percent", 2.0),
+                        result["price"], exit_plan["stop_loss"]
+                    )
+                    if pos_info:
+                        card_text += f"Suggested Size: ${pos_info['position_size_usd']} (risking ${pos_info['risk_amount']})\n"
 
             label = Label(text=card_text, markup=True, size_hint_y=None, height=230,
                           halign="left", valign="top", **self.label_kwargs())
