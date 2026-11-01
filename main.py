@@ -1,12 +1,50 @@
+import faulthandler
+import os
+import sys
 import threading
 import traceback
+
+
+def _crash_log_path():
+    base = os.environ.get("ANDROID_PRIVATE") or os.path.join(os.path.expanduser("~"), ".cryptoscanner")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        base = os.getcwd()
+    return os.path.join(base, "crash.log")
+
+
+PREV_CRASH = None
+_LOG_FILE = None
+try:
+    _path = _crash_log_path()
+    if os.path.exists(_path):
+        with open(_path, "r", encoding="utf-8", errors="replace") as _f:
+            _txt = _f.read().strip()
+        if _txt:
+            PREV_CRASH = _txt[-3500:]
+    _LOG_FILE = open(_path, "w", encoding="utf-8")
+    faulthandler.enable(file=_LOG_FILE, all_threads=True)
+
+    def _hook(exc_type, exc, tb):
+        try:
+            _LOG_FILE.write("".join(traceback.format_exception(exc_type, exc, tb)))
+            _LOG_FILE.flush()
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _hook
+except Exception:
+    pass
 
 from kivy.app import App
 from kivy.core.window import Window
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
-from kivy.uix.button import Button, ToggleButton
+from kivy.uix.button import Button
+from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
@@ -50,6 +88,8 @@ def error_screen(text):
 
 class CryptoScannerApp(App):
     def build(self):
+        if PREV_CRASH:
+            return error_screen("PREVIOUS RUN CRASHED. Close the app fully and reopen it to continue.\n\n" + PREV_CRASH)
         if IMPORT_ERROR:
             return error_screen(IMPORT_ERROR)
         try:
@@ -89,7 +129,7 @@ class CryptoScannerApp(App):
         self.mtf_toggle.bind(on_press=self.on_mtf_toggle)
         control_bar.add_widget(self.mtf_toggle)
 
-        self.dark_toggle = ToggleButton(text="🌙", state="down" if self.settings["dark_mode"] else "normal", size_hint_x=0.13)
+        self.dark_toggle = ToggleButton(text="Dark", state="down" if self.settings["dark_mode"] else "normal", size_hint_x=0.13)
         self.dark_toggle.bind(on_press=self.on_dark_toggle)
         control_bar.add_widget(self.dark_toggle)
 
@@ -441,7 +481,7 @@ class CryptoScannerApp(App):
         summary_text = (
             f"[b][size=18]Overall Performance[/size][/b]\n\n"
             f"Total Closed: {overall['total_closed']}\n"
-            f"✅ Wins: {overall['wins']}   ❌ Losses: {overall['losses']}\n"
+            f"Wins: {overall['wins']}   Losses: {overall['losses']}\n"
             f"[b]Win Rate: {overall['win_rate']}%[/b]\n"
             f"Avg Profit/Trade: {overall['avg_profit_percent']}%\n"
             f"Pending: {pending_count}\n"
@@ -452,7 +492,7 @@ class CryptoScannerApp(App):
         self.stats_layout.add_widget(summary)
 
         for symbol, tf, sig_type, status, profit, closed_at in get_recent_history(15):
-            icon = "✅" if status == "WIN" else ("❌" if status == "LOSS" else "⌛")
+            icon = "[WIN]" if status == "WIN" else ("[LOSS]" if status == "LOSS" else "[...]")
             profit_str = f"{profit:+.2f}%" if profit is not None else "N/A"
             text = f"{icon} {symbol} [{tf}] {sig_type} -> {status} ({profit_str})"
             item = Label(text=text, size_hint_y=None, height=28, halign="left", **self.label_kwargs())
@@ -479,7 +519,7 @@ class CryptoScannerApp(App):
 
         self.paper_layout.add_widget(Label(text="[b]Closed Trade History[/b]", markup=True, size_hint_y=None, height=30, **self.label_kwargs()))
         for symbol, sig_type, entry, closed, pnl in get_paper_trade_history(15):
-            icon = "✅" if pnl and pnl > 0 else "❌"
+            icon = "[WIN]" if pnl and pnl > 0 else "[LOSS]"
             text = f"{icon} {symbol} {sig_type} | Entry: {entry} -> {closed} | PnL: ${pnl:.2f}"
             item = Label(text=text, size_hint_y=None, height=28, **self.label_kwargs())
             self.paper_layout.add_widget(item)
@@ -549,9 +589,9 @@ class CryptoScannerApp(App):
             self.settings["paper_trading_enabled"] = self.paper_toggle.state == "down"
 
             save_settings(self.settings)
-            self.settings_status.text = "✅ Settings saved successfully!"
+            self.settings_status.text = "Settings saved successfully!"
         except ValueError as e:
-            self.settings_status.text = f"❌ Error: Check your input values ({e})"
+            self.settings_status.text = f"Error: Check your input values ({e})"
 
 
 if __name__ == "__main__":
